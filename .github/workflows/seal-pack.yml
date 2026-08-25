@@ -1,0 +1,105 @@
+name: seal-pack
+
+# Build-and-pack only. The project's test suite runs on Travis
+# (.travis.yml -> `npm test` -> grunt: jsonlint, build, jshint, jscs, uglify,
+# dist, compare_size), so this workflow deliberately carries no test step and
+# no test-filter input.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pack:
+    name: pack npm tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The published tarball ships dist/cdn/* alongside dist/jquery.js, and
+      # `grunt` does not emit them: upstream produced them in makeReleaseCopies()
+      # inside build/release.js, which only runs under the jquery-release harness
+      # (git tags, npm publish, CDN zip archives) and cannot run in CI. This is
+      # that one copy step, ported verbatim, with the release version read from
+      # package.json instead of Release.newVersion.
+      - name: Generate dist/cdn release copies
+        run: |
+          cat > "$RUNNER_TEMP/release-copies.js" <<'EOF'
+          "use strict";
+          var fs = require("fs"),
+            devFile = "dist/jquery.js",
+            minFile = "dist/jquery.min.js",
+            mapFile = "dist/jquery.min.map",
+            cdnFolder = "dist/cdn",
+            version = JSON.parse(fs.readFileSync("package.json", "utf8")).version,
+            releaseFiles = {
+              "jquery-VER.js": devFile,
+              "jquery-VER.min.js": minFile,
+              "jquery-VER.min.map": mapFile,
+              "jquery.js": devFile,
+              "jquery.min.js": minFile,
+              "jquery.min.map": mapFile,
+              "jquery-latest.js": devFile,
+              "jquery-latest.min.js": minFile,
+              "jquery-latest.min.map": mapFile
+            };
+          fs.mkdirSync(cdnFolder, { recursive: true });
+          Object.keys(releaseFiles).forEach(function(key) {
+            var text,
+              builtFile = releaseFiles[key],
+              unpathedFile = key.replace(/VER/g, version),
+              releaseFile = cdnFolder + "/" + unpathedFile;
+            if (/\.map$/.test(releaseFile)) {
+              // Map files reference the new uncompressed name; all files are
+              // assumed to sit in the same directory.
+              text = fs.readFileSync(builtFile, "utf8").replace(
+                /"file":"([^"]+)","sources":\["([^"]+)"\]/,
+                "\"file\":\"" + unpathedFile.replace(/\.min\.map/, ".min.js") +
+                  "\",\"sources\":[\"" + unpathedFile.replace(/\.min\.map/, ".js") + "\"]");
+              fs.writeFileSync(releaseFile, text);
+            } else if (/\.min\.js$/.test(releaseFile)) {
+              // Upstream strips the source map comment from the CDN copies.
+              text = fs.readFileSync(builtFile, "utf8")
+                .replace(/\/\/# sourceMappingURL=\S+/, "");
+              fs.writeFileSync(releaseFile, text);
+            } else if (builtFile !== releaseFile) {
+              fs.writeFileSync(releaseFile, fs.readFileSync(builtFile));
+            }
+            console.log("File '" + releaseFile + "' created.");
+          });
+          EOF
+          node "$RUNNER_TEMP/release-copies.js"
+          ls -l dist/cdn
+
+      # jquery 1.11.1 was published with npm 1.2.25. npm >= 5 (npm-packlist)
+      # unconditionally drops .npmignore from the tarball, and the public
+      # artifact contains it, so pack with the original npm to match its
+      # member set. Installed outside the repo so its node_modules and
+      # package-lock.json stay out of the packed tree.
+      - name: Install npm 1.2.25
+        run: |
+          mkdir -p "$RUNNER_TEMP/npm125"
+          cd "$RUNNER_TEMP/npm125"
+          npm install npm@1.2.25 --no-audit --no-fund
+
+      - name: npm pack
+        run: |
+          # .npmignore is itself a member of the published tarball, so it cannot
+          # be extended to hide this workflow; drop the directory instead.
+          rm -rf .github
+          node "$RUNNER_TEMP/npm125/node_modules/npm/bin/npm-cli.js" pack
+          mkdir -p pack-output
+          mv jquery-*.tgz pack-output/
+          ls -l pack-output
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: pack-output/*.tgz
+          if-no-files-found: error

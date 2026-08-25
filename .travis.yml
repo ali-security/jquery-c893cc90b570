@@ -1,3 +1,29 @@
 language: node_js
 node_js:
 - '0.10'
+
+# jQuery 1.11.1's unit suite is a browser harness (test/index.html, QUnit 1.14)
+# whose ajax/manipulation tests fetch PHP endpoints under test/data. `grunt` only
+# lints and builds, and upstream ran the suite on TestSwarm against a farm of real
+# browsers, so it runs here against the stable Chrome the addon installs, served
+# by PHP's built-in server. .github/run-qunit.js is the driver.
+addons:
+  chrome: stable
+  apt:
+    packages:
+    - php-cli
+
+before_script:
+# PHP_CLI_SERVER_WORKERS: the suite issues parallel and deliberately-slow
+# requests (test/data/name.php?wait=...), which deadlock a single-worker server.
+- PHP_CLI_SERVER_WORKERS=8 php -S 127.0.0.1:8000 -t . > /tmp/php-server.log 2>&1 &
+- for i in $(seq 30); do curl -sf http://127.0.0.1:8000/test/index.html > /dev/null && break; sleep 1; done
+- curl -sf "http://127.0.0.1:8000/test/data/name.php"
+
+script:
+# The project's own test command, on the Node it shipped with.
+- npm test
+# puppeteer-core needs a modern Node; the grunt build above has already run on 0.10.
+- nvm install 20
+- npm install --no-save --prefix /tmp/qunit-runner puppeteer-core@23
+- NODE_PATH=/tmp/qunit-runner/node_modules PUPPETEER_EXECUTABLE_PATH="$(which google-chrome || which google-chrome-stable)" node .github/run-qunit.js http://127.0.0.1:8000/test/index.html
